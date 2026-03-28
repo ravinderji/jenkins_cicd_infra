@@ -49,6 +49,12 @@ pipeline {
         // Directory on the Jenkins server where EC2 IPs are persisted
         // App pipelines (backend / frontend) read from this directory
         TF_STATE_DIR = "/var/lib/jenkins/tf-state"
+
+        // Terraform variables sourced from Jenkins credentials
+        // (terraform.tfvars is gitignored — no values are hardcoded here)
+        TF_VAR_aws_region        = credentials("tf-aws-region")
+        TF_VAR_availability_zone = credentials("tf-availability-zone")
+        TF_VAR_ami_id            = credentials("tf-ami-id")
     }
 
     stages {
