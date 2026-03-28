@@ -68,8 +68,10 @@ pipeline {
                 echo "Branch : ${env.GIT_BRANCH}"
                 echo "Commit : ${env.GIT_SHORT}"
                 echo "Build# : ${env.BUILD_NUMBER}"
-                if (params.DESTROY_INFRA) {
-                    echo "⚠ DESTROY MODE — all AWS resources will be deleted ⚠"
+                script {
+                    if (params.DESTROY_INFRA) {
+                        echo "⚠ DESTROY MODE — all AWS resources will be deleted ⚠"
+                    }
                 }
             }
         }
