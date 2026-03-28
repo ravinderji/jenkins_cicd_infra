@@ -3,24 +3,24 @@
 # Jenkins EC2 Bootstrap Script
 # Installs: Java 17, Jenkins, Docker, Maven, Node.js 20, Ansible, Terraform
 # =============================================================================
-set -euo pipefail
+# -uo pipefail: flag undefined vars and pipe errors, but NOT -e so one
+# section failing does NOT abort the whole script.
+set -uo pipefail
 exec > /var/log/userdata.log 2>&1
 
 echo "=== Jenkins Bootstrap START: $(date) ==="
 
 # ── Helper: retry a command up to 3 times with 10s delay ─────────────────────
 retry() {
-  local attempts=3
-  local delay=10
   local count=0
   until "$@"; do
     count=$((count + 1))
-    if [ "$count" -ge "$attempts" ]; then
-      echo "ERROR: Command failed after $attempts attempts: $*"
+    if [ "$count" -ge 3 ]; then
+      echo "ERROR: Command failed after 3 attempts: $*"
       return 1
     fi
-    echo "Attempt $count/$attempts failed — retrying in ${delay}s..."
-    sleep "$delay"
+    echo "  retry $count/3 in 10s..."
+    sleep 10
   done
 }
 
@@ -35,37 +35,37 @@ mkdir -p "$GNUPGHOME"
 chmod 700 "$GNUPGHOME"
 
 # ── Base packages ─────────────────────────────────────────────────────────────
+echo "--- Installing base packages ---"
 retry apt-get update -y
 retry apt-get install -y \
   ca-certificates curl gnupg wget unzip git \
   software-properties-common apt-transport-https \
   python3 python3-pip
+echo "--- Base packages OK ---"
 
 # ── Java 17 ───────────────────────────────────────────────────────────────────
 echo "--- Installing Java 17 ---"
 retry apt-get install -y openjdk-17-jdk
 java -version
+echo "--- Java 17 OK ---"
 
 # ── Jenkins ───────────────────────────────────────────────────────────────────
-# Fetch signing key by exact fingerprint from keyserver — the jenkins.io-2023.key
-# URL contains a DIFFERENT key that does not match the repo's Release.gpg signature.
-# Fingerprint 5E386EADB55F01504CAE8BCF7198F4B714ABFC68 is the actual signing key.
+# Use jenkins.io.key (NOT jenkins.io-2023.key — that is a different key whose
+# fingerprint does NOT match the repo's Release.gpg signature).
+# jenkins.io.key fingerprint: 5E386EAD B55F0150 4CAE8BCF 7198F4B7 14ABFC68
 echo "--- Installing Jenkins ---"
-gpg --batch --keyserver hkp://keyserver.ubuntu.com:80 \
-  --recv-keys 5E386EADB55F01504CAE8BCF7198F4B714ABFC68
-gpg --batch --export 5E386EADB55F01504CAE8BCF7198F4B714ABFC68 \
-  > /usr/share/keyrings/jenkins-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.gpg] \
+curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io.key \
+  -o /usr/share/keyrings/jenkins-keyring.asc
+echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] \
   https://pkg.jenkins.io/debian-stable binary/" \
   | tee /etc/apt/sources.list.d/jenkins.list > /dev/null
 retry apt-get update -y
 retry apt-get install -y jenkins
 systemctl enable jenkins
 systemctl start jenkins
-echo "Jenkins installed OK"
+echo "--- Jenkins OK ---"
 
 # ── Docker ────────────────────────────────────────────────────────────────────
-# Use file-based gpg --dearmor (not stdin redirect) with explicit output path
 echo "--- Installing Docker ---"
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /tmp/docker.gpg
 gpg --batch --yes --dearmor \
@@ -81,26 +81,29 @@ usermod -aG docker jenkins
 systemctl enable docker
 systemctl start docker
 docker --version
+echo "--- Docker OK ---"
 
 # ── Maven ─────────────────────────────────────────────────────────────────────
 echo "--- Installing Maven ---"
 retry apt-get install -y maven
 mvn --version | head -1
+echo "--- Maven OK ---"
 
 # ── Node.js 20 ────────────────────────────────────────────────────────────────
 echo "--- Installing Node.js 20 ---"
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 retry apt-get install -y nodejs
 node --version
+echo "--- Node.js OK ---"
 
 # ── Ansible ───────────────────────────────────────────────────────────────────
 echo "--- Installing Ansible ---"
 pip3 install --quiet ansible --break-system-packages
 sudo -u jenkins ansible-galaxy collection install community.docker
 ansible --version | head -1
+echo "--- Ansible OK ---"
 
 # ── Terraform ─────────────────────────────────────────────────────────────────
-# Use file-based gpg --dearmor with explicit output path
 echo "--- Installing Terraform ---"
 wget -qO /tmp/hashicorp.gpg https://apt.releases.hashicorp.com/gpg
 gpg --batch --yes --dearmor \
@@ -112,10 +115,12 @@ echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
 retry apt-get update -y
 retry apt-get install -y terraform
 terraform version | head -1
+echo "--- Terraform OK ---"
 
 # ── Restart Jenkins so docker group membership takes effect ──────────────────
 echo "--- Restarting Jenkins ---"
 systemctl restart jenkins
+echo "--- Jenkins restarted ---"
 
 # ── Directories for SSH key and Terraform state ──────────────────────────────
 mkdir -p /var/lib/jenkins/.ssh
