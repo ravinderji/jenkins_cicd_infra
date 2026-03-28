@@ -47,11 +47,15 @@ retry apt-get install -y openjdk-17-jdk
 java -version
 
 # ── Jenkins ───────────────────────────────────────────────────────────────────
-# Use .asc (armored) format — official Jenkins docs approach, no gpg --dearmor needed
+# Fetch signing key by exact fingerprint from keyserver — the jenkins.io-2023.key
+# URL contains a DIFFERENT key that does not match the repo's Release.gpg signature.
+# Fingerprint 5E386EADB55F01504CAE8BCF7198F4B714ABFC68 is the actual signing key.
 echo "--- Installing Jenkins ---"
-curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key \
-  -o /usr/share/keyrings/jenkins-keyring.asc
-echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] \
+gpg --batch --keyserver hkp://keyserver.ubuntu.com:80 \
+  --recv-keys 5E386EADB55F01504CAE8BCF7198F4B714ABFC68
+gpg --batch --export 5E386EADB55F01504CAE8BCF7198F4B714ABFC68 \
+  > /usr/share/keyrings/jenkins-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.gpg] \
   https://pkg.jenkins.io/debian-stable binary/" \
   | tee /etc/apt/sources.list.d/jenkins.list > /dev/null
 retry apt-get update -y
