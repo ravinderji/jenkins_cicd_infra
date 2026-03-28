@@ -1,0 +1,228 @@
+/*
+ ╔══════════════════════════════════════════════════════════════════════════════╗
+ ║  INFRASTRUCTURE PIPELINE  —  cicd-boostrap/Jenkinsfile.infra               ║
+ ║                                                                              ║
+ ║  PURPOSE: Provision ALL AWS infrastructure for the entire project.           ║
+ ║    • VPC, Subnet, Internet Gateway, Route Table                              ║
+ ║    • Security Groups (Jenkins, Backend, Frontend)                            ║
+ ║    • Jenkins EC2 + Elastic IP                                                ║
+ ║    • Backend EC2  + Elastic IP                                               ║
+ ║    • Frontend EC2 + Elastic IP                                               ║
+ ║                                                                              ║
+ ║  WHEN TO RUN:                                                                ║
+ ║    • Manually (first time, or after terraform/** changes)                    ║
+ ║    • With DESTROY_INFRA=true to tear down all AWS resources                  ║
+ ║    • Never triggered automatically on application code pushes                ║
+ ║                                                                              ║
+ ║  OUTPUT: Writes EC2 IPs to /var/lib/jenkins/tf-state/                        ║
+ ║    backend_ip.txt, frontend_ip.txt, jenkins_ip.txt                          ║
+ ║    These files are READ by the app pipelines (backend/frontend)              ║
+ ║                                                                              ║
+ ║  Required Jenkins credentials:                                               ║
+ ║    aws-access-key-id       Secret text   IAM Access Key ID                  ║
+ ║    aws-secret-access-key   Secret text   IAM Secret Access Key              ║
+ ║    tf-key-pair-name        Secret text   EC2 Key Pair name                  ║
+ ║    tf-allowed-ssh-cidr     Secret text   Your IP in CIDR (x.x.x.x/32)      ║
+ ╚══════════════════════════════════════════════════════════════════════════════╝
+ */
+
+pipeline {
+    agent any
+
+    parameters {
+        booleanParam(
+            name:         'DESTROY_INFRA',
+            defaultValue: false,
+            description:  'WARNING: Set true to destroy ALL AWS resources (VPC, EC2s, EIPs). Irreversible.'
+        )
+    }
+
+    environment {
+        // AWS credentials consumed directly by the Terraform AWS provider
+        AWS_ACCESS_KEY_ID     = credentials("aws-access-key-id")
+        AWS_SECRET_ACCESS_KEY = credentials("aws-secret-access-key")
+        AWS_DEFAULT_REGION    = "us-east-1"
+
+        // Path to Terraform root module inside this repo
+        TF_DIR = "terraform/environments/dev"
+
+        // Directory on the Jenkins server where EC2 IPs are persisted
+        // App pipelines (backend / frontend) read from this directory
+        TF_STATE_DIR = "/var/lib/jenkins/tf-state"
+    }
+
+    stages {
+
+        // ── Stage 1: CHECKOUT ─────────────────────────────────────────────
+        stage("Stage 1 - Checkout") {
+            steps {
+                echo "========================================"
+                echo " Stage 1 — Checkout"
+                echo "========================================"
+                checkout scm
+                script {
+                    env.GIT_SHORT = sh(script: "git rev-parse --short HEAD",
+                                       returnStdout: true).trim()
+                }
+                echo "Repo   : cicd-boostrap (infrastructure)"
+                echo "Branch : ${env.GIT_BRANCH}"
+                echo "Commit : ${env.GIT_SHORT}"
+                echo "Build# : ${env.BUILD_NUMBER}"
+                if (params.DESTROY_INFRA) {
+                    echo "⚠ DESTROY MODE — all AWS resources will be deleted ⚠"
+                }
+            }
+        }
+
+        // ── Stage 2: TERRAFORM INIT ───────────────────────────────────────
+        stage("Stage 2 - Terraform Init") {
+            steps {
+                echo "========================================"
+                echo " Stage 2 — Terraform Init"
+                echo "========================================"
+                dir("${TF_DIR}") {
+                    sh "terraform version"
+                    // -reconfigure ensures a clean backend on each run
+                    sh "terraform init -input=false -reconfigure"
+                }
+            }
+        }
+
+        // ── Stage 3: TERRAFORM PLAN ───────────────────────────────────────
+        // Sensitive vars (key pair, SSH CIDR) are injected from Jenkins
+        // credentials — never hardcoded in tfvars or this file
+        stage("Stage 3 - Terraform Plan") {
+            steps {
+                echo "========================================"
+                echo " Stage 3 — Terraform Plan"
+                echo "========================================"
+                dir("${TF_DIR}") {
+                    withCredentials([
+                        string(credentialsId: "tf-key-pair-name",    variable: "KEY_PAIR"),
+                        string(credentialsId: "tf-allowed-ssh-cidr", variable: "SSH_CIDR")
+                    ]) {
+                        script {
+                            if (params.DESTROY_INFRA) {
+                                sh """
+                                    terraform plan -destroy \
+                                        -var="key_pair_name=${KEY_PAIR}" \
+                                        -var="allowed_ssh_cidr=${SSH_CIDR}" \
+                                        -input=false \
+                                        -out=tfplan
+                                """
+                            } else {
+                                sh """
+                                    terraform plan \
+                                        -var="key_pair_name=${KEY_PAIR}" \
+                                        -var="allowed_ssh_cidr=${SSH_CIDR}" \
+                                        -input=false \
+                                        -out=tfplan
+                                """
+                            }
+                        }
+                        sh "terraform show -no-color tfplan > tfplan.txt"
+                    }
+                    archiveArtifacts artifacts: "tfplan.txt", fingerprint: false
+                    echo "Terraform plan saved as build artifact (tfplan.txt)"
+                }
+            }
+        }
+
+        // ── Stage 4: TERRAFORM APPLY ──────────────────────────────────────
+        // Provisions: VPC, IGW, Subnets, Route Table, 3 Security Groups,
+        //             Jenkins EC2 + EIP, Backend EC2 + EIP, Frontend EC2 + EIP
+        // Skipped when DESTROY_INFRA=true
+        stage("Stage 4 - Terraform Apply") {
+            when {
+                expression { return !params.DESTROY_INFRA }
+            }
+            steps {
+                echo "========================================"
+                echo " Stage 4 — Terraform Apply"
+                echo " Provisioning all AWS infrastructure..."
+                echo "========================================"
+                dir("${TF_DIR}") {
+                    sh "terraform apply -input=false -auto-approve tfplan"
+
+                    // Read all three EC2 IPs from Terraform outputs
+                    script {
+                        env.JENKINS_IP  = sh(script: "terraform output -raw jenkins_public_ip",
+                                             returnStdout: true).trim()
+                        env.BACKEND_IP  = sh(script: "terraform output -raw backend_public_ip",
+                                             returnStdout: true).trim()
+                        env.FRONTEND_IP = sh(script: "terraform output -raw frontend_public_ip",
+                                             returnStdout: true).trim()
+                    }
+
+                    // Persist IPs to disk so app pipelines can read them
+                    // without running Terraform again
+                    sh """
+                        mkdir -p ${TF_STATE_DIR}
+                        echo "${env.JENKINS_IP}"  > ${TF_STATE_DIR}/jenkins_ip.txt
+                        echo "${env.BACKEND_IP}"  > ${TF_STATE_DIR}/backend_ip.txt
+                        echo "${env.FRONTEND_IP}" > ${TF_STATE_DIR}/frontend_ip.txt
+                    """
+
+                    echo "========================================"
+                    echo " Infrastructure provisioned successfully"
+                    echo "========================================"
+                    echo " Jenkins  : http://${env.JENKINS_IP}:8080"
+                    echo " Backend  : http://${env.BACKEND_IP}:8080/api"
+                    echo " Frontend : http://${env.FRONTEND_IP}"
+                    echo "========================================"
+                    echo " NEXT STEPS:"
+                    echo "   1. Run backend-app-pipeline to deploy the backend"
+                    echo "   2. Run frontend-app-pipeline to deploy the frontend"
+                    echo "========================================"
+                }
+            }
+        }
+
+        // ── Stage 5: TERRAFORM DESTROY ────────────────────────────────────
+        // Only runs when DESTROY_INFRA=true (manually triggered)
+        // Deletes all AWS resources and clears the persisted IP files
+        stage("Stage 5 - Terraform Destroy") {
+            when {
+                expression { return params.DESTROY_INFRA }
+            }
+            steps {
+                echo "========================================"
+                echo " Stage 5 — Terraform Destroy"
+                echo " ⚠ DELETING ALL AWS RESOURCES ⚠"
+                echo "========================================"
+                dir("${TF_DIR}") {
+                    sh "terraform apply -input=false -auto-approve tfplan"
+                    // Remove persisted IP files so app pipelines
+                    // fail fast with a clear error instead of
+                    // deploying to a non-existent server
+                    sh """
+                        rm -f ${TF_STATE_DIR}/jenkins_ip.txt
+                        rm -f ${TF_STATE_DIR}/backend_ip.txt
+                        rm -f ${TF_STATE_DIR}/frontend_ip.txt
+                    """
+                    echo "All AWS resources destroyed and IP files removed"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                if (params.DESTROY_INFRA) {
+                    echo "INFRA DESTROY SUCCEEDED — Build #${env.BUILD_NUMBER}"
+                    echo "All AWS resources have been deleted"
+                } else {
+                    echo "INFRA PIPELINE SUCCEEDED — Build #${env.BUILD_NUMBER}"
+                    echo "  Jenkins  : http://${env.JENKINS_IP}:8080"
+                    echo "  Backend  : http://${env.BACKEND_IP}:8080/api"
+                    echo "  Frontend : http://${env.FRONTEND_IP}"
+                }
+            }
+        }
+        failure {
+            echo "INFRA PIPELINE FAILED — Build #${env.BUILD_NUMBER}"
+            echo "Review the Terraform output above for the error."
+        }
+    }
+}
