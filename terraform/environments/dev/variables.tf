@@ -20,7 +20,7 @@ variable "ami_id" { type = string }
 variable "key_pair_name" { type = string }
 variable "jenkins_instance_type" {
   type    = string
-  default = "t3.micro"
+  default = "t3.medium"
 }
 variable "app_instance_type" {
   type    = string
