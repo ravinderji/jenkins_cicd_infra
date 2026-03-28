@@ -1,78 +1,144 @@
 #!/bin/bash
+# =============================================================================
+# Jenkins EC2 Bootstrap Script
+# Installs: Java 17, Jenkins, Docker, Maven, Node.js 20, Ansible, Terraform
+# =============================================================================
 set -euo pipefail
 exec > /var/log/userdata.log 2>&1
-echo "=== Jenkins Bootstrap START ==="
 
-apt-get update -y
-apt-get install -y ca-certificates curl gnupg wget unzip git software-properties-common
+echo "=== Jenkins Bootstrap START: $(date) ==="
 
-# Distro codename — read from /etc/os-release (works reliably in userdata without lsb_release)
+# ── Helper: retry a command up to 3 times with 10s delay ─────────────────────
+retry() {
+  local attempts=3
+  local delay=10
+  local count=0
+  until "$@"; do
+    count=$((count + 1))
+    if [ "$count" -ge "$attempts" ]; then
+      echo "ERROR: Command failed after $attempts attempts: $*"
+      return 1
+    fi
+    echo "Attempt $count/$attempts failed — retrying in ${delay}s..."
+    sleep "$delay"
+  done
+}
+
+# ── Distro codename — never use lsb_release (may not be installed yet) ───────
 DISTRO=$(. /etc/os-release && echo "$VERSION_CODENAME")
-echo "Detected distro codename: $DISTRO"
+ARCH=$(dpkg --print-architecture)
+echo "Distro: $DISTRO | Arch: $ARCH"
 
-# Java 17
-apt-get install -y openjdk-17-jdk
+# ── Dedicated GPG home — prevents 'no home dir' errors in headless root ──────
+export GNUPGHOME=/tmp/gnupg-bootstrap
+mkdir -p "$GNUPGHOME"
+chmod 700 "$GNUPGHOME"
 
-# Jenkins — download key to file first, then dearmor (avoids corrupt keyring from broken pipe)
-wget -qO /tmp/jenkins.gpg https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
-gpg --dearmor < /tmp/jenkins.gpg > /usr/share/keyrings/jenkins-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.gpg] \
+# ── Base packages ─────────────────────────────────────────────────────────────
+retry apt-get update -y
+retry apt-get install -y \
+  ca-certificates curl gnupg wget unzip git \
+  software-properties-common apt-transport-https \
+  python3 python3-pip
+
+# ── Java 17 ───────────────────────────────────────────────────────────────────
+echo "--- Installing Java 17 ---"
+retry apt-get install -y openjdk-17-jdk
+java -version
+
+# ── Jenkins ───────────────────────────────────────────────────────────────────
+# Use .asc (armored) format — official Jenkins docs approach, no gpg --dearmor needed
+echo "--- Installing Jenkins ---"
+curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key \
+  -o /usr/share/keyrings/jenkins-keyring.asc
+echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] \
   https://pkg.jenkins.io/debian-stable binary/" \
   | tee /etc/apt/sources.list.d/jenkins.list > /dev/null
-apt-get update -y && apt-get install -y jenkins
+retry apt-get update -y
+retry apt-get install -y jenkins
+systemctl enable jenkins
+systemctl start jenkins
+echo "Jenkins installed OK"
 
-systemctl enable jenkins && systemctl start jenkins
-
-# Docker — download key to file first, then dearmor
+# ── Docker ────────────────────────────────────────────────────────────────────
+# Use file-based gpg --dearmor (not stdin redirect) with explicit output path
+echo "--- Installing Docker ---"
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /tmp/docker.gpg
-gpg --dearmor < /tmp/docker.gpg > /usr/share/keyrings/docker-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) \
-  signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
+gpg --batch --yes --dearmor \
+  -o /usr/share/keyrings/docker-archive-keyring.gpg \
+  /tmp/docker.gpg
+echo "deb [arch=${ARCH} signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
   https://download.docker.com/linux/ubuntu ${DISTRO} stable" \
   | tee /etc/apt/sources.list.d/docker.list > /dev/null
-apt-get update -y
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+retry apt-get update -y
+retry apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 usermod -aG docker ubuntu
 usermod -aG docker jenkins
-systemctl enable docker && systemctl start docker
+systemctl enable docker
+systemctl start docker
+docker --version
 
-# Maven
-apt-get install -y maven
+# ── Maven ─────────────────────────────────────────────────────────────────────
+echo "--- Installing Maven ---"
+retry apt-get install -y maven
+mvn --version | head -1
 
-# Node.js 20
+# ── Node.js 20 ────────────────────────────────────────────────────────────────
+echo "--- Installing Node.js 20 ---"
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt-get install -y nodejs
+retry apt-get install -y nodejs
+node --version
 
-# Ansible
-apt-get install -y python3 python3-pip
-pip3 install ansible --break-system-packages
+# ── Ansible ───────────────────────────────────────────────────────────────────
+echo "--- Installing Ansible ---"
+pip3 install --quiet ansible --break-system-packages
 sudo -u jenkins ansible-galaxy collection install community.docker
+ansible --version | head -1
 
-# Terraform — download key to file first, then dearmor
+# ── Terraform ─────────────────────────────────────────────────────────────────
+# Use file-based gpg --dearmor with explicit output path
+echo "--- Installing Terraform ---"
 wget -qO /tmp/hashicorp.gpg https://apt.releases.hashicorp.com/gpg
-gpg --dearmor < /tmp/hashicorp.gpg > /usr/share/keyrings/hashicorp-archive-keyring.gpg
+gpg --batch --yes --dearmor \
+  -o /usr/share/keyrings/hashicorp-archive-keyring.gpg \
+  /tmp/hashicorp.gpg
 echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
   https://apt.releases.hashicorp.com ${DISTRO} main" \
   | tee /etc/apt/sources.list.d/hashicorp.list > /dev/null
-apt-get update -y && apt-get install -y terraform
+retry apt-get update -y
+retry apt-get install -y terraform
+terraform version | head -1
 
-# Restart Jenkins so docker group takes effect
+# ── Restart Jenkins so docker group membership takes effect ──────────────────
+echo "--- Restarting Jenkins ---"
 systemctl restart jenkins
 
-# Directories for deploy key and Terraform state
+# ── Directories for SSH key and Terraform state ──────────────────────────────
 mkdir -p /var/lib/jenkins/.ssh
 chmod 700 /var/lib/jenkins/.ssh
 chown -R jenkins:jenkins /var/lib/jenkins/.ssh
+
 mkdir -p /var/lib/jenkins/tf-state
 chown -R jenkins:jenkins /var/lib/jenkins/tf-state
 
-echo "=== Jenkins Bootstrap COMPLETE ==="
-echo "Waiting for Jenkins to generate initial admin password..."
+# ── Verify all tools are accessible by jenkins user ──────────────────────────
+echo "--- Tool verification ---"
+sudo -u jenkins java -version 2>&1 | head -1
+sudo -u jenkins docker --version
+sudo -u jenkins mvn --version | head -1
+sudo -u jenkins node --version
+sudo -u jenkins ansible --version | head -1
+sudo -u jenkins terraform version | head -1
+echo "--- All tools verified ---"
+
+# ── Wait for Jenkins initial admin password ───────────────────────────────────
+echo "=== Jenkins Bootstrap COMPLETE: $(date) ==="
+echo "Waiting for Jenkins initial admin password..."
 for i in $(seq 1 30); do
   if [ -f /var/lib/jenkins/secrets/initialAdminPassword ]; then
-    echo "Initial Admin Password:"
-    cat /var/lib/jenkins/secrets/initialAdminPassword
+    echo "Initial Admin Password: $(cat /var/lib/jenkins/secrets/initialAdminPassword)"
     break
   fi
+  echo "  waiting... ($i/30)"
   sleep 10
 done
