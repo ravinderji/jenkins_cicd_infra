@@ -50,19 +50,49 @@ java -version
 echo "--- Java 17 OK ---"
 
 # ── Jenkins ───────────────────────────────────────────────────────────────────
-# Use jenkins.io.key (NOT jenkins.io-2023.key — that is a different key whose
-# fingerprint does NOT match the repo's Release.gpg signature).
-# jenkins.io.key fingerprint: 5E386EAD B55F0150 4CAE8BCF 7198F4B7 14ABFC68
+# Tries 3 methods to get the GPG key — stops at first success.
+# Key ID: 7198F4B714ABFC68 (active signing key since 2023)
 echo "--- Installing Jenkins ---"
-curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io.key \
-  -o /usr/share/keyrings/jenkins-keyring.asc
-echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] \
-  https://pkg.jenkins.io/debian-stable binary/" \
-  | tee /etc/apt/sources.list.d/jenkins.list > /dev/null
-retry apt-get update -y
-retry apt-get install -y jenkins
-systemctl enable jenkins
-systemctl start jenkins
+JENKINS_KEY=/usr/share/keyrings/jenkins-keyring.asc
+JENKINS_KEY_ID="7198F4B714ABFC68"
+
+jenkins_key_ok=false
+
+# Method 1: jenkins.io-2023.key (preferred direct download)
+if curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key \
+     -o "$JENKINS_KEY" 2>/dev/null && [ -s "$JENKINS_KEY" ]; then
+  echo "  Jenkins key: method 1 (jenkins.io-2023.key) OK"
+  jenkins_key_ok=true
+fi
+
+# Method 2: Ubuntu keyserver
+if [ "$jenkins_key_ok" = false ]; then
+  if gpg --keyserver keyserver.ubuntu.com --recv-keys "$JENKINS_KEY_ID" 2>/dev/null && \
+     gpg --export --armor "$JENKINS_KEY_ID" > "$JENKINS_KEY" 2>/dev/null && [ -s "$JENKINS_KEY" ]; then
+    echo "  Jenkins key: method 2 (keyserver.ubuntu.com) OK"
+    jenkins_key_ok=true
+  fi
+fi
+
+# Method 3: keys.openpgp.org
+if [ "$jenkins_key_ok" = false ]; then
+  if gpg --keyserver keys.openpgp.org --recv-keys "$JENKINS_KEY_ID" 2>/dev/null && \
+     gpg --export --armor "$JENKINS_KEY_ID" > "$JENKINS_KEY" 2>/dev/null && [ -s "$JENKINS_KEY" ]; then
+    echo "  Jenkins key: method 3 (keys.openpgp.org) OK"
+    jenkins_key_ok=true
+  fi
+fi
+
+if [ "$jenkins_key_ok" = false ]; then
+  echo "ERROR: All Jenkins GPG key methods failed"
+else
+  echo "deb [signed-by=${JENKINS_KEY}] https://pkg.jenkins.io/debian-stable binary/" \
+    | tee /etc/apt/sources.list.d/jenkins.list > /dev/null
+  retry apt-get update -y
+  retry apt-get install -y jenkins
+  systemctl enable jenkins
+  systemctl start jenkins
+fi
 echo "--- Jenkins OK ---"
 
 # ── Docker ────────────────────────────────────────────────────────────────────
