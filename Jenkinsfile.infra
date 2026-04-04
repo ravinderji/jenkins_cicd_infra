@@ -40,6 +40,11 @@ pipeline {
             defaultValue: false,
             description:  'Set true to also destroy VPC and networking (only works if IAM permits ec2:DeleteVpc). Leave false in lab environments.'
         )
+        booleanParam(
+            name:         'PROVISION_JENKINS_NODE',
+            defaultValue: false,
+            description:  'Set true to include Jenkins EC2 in provisioning. Leave false when Jenkins is already running (avoids creating a duplicate Jenkins node).'
+        )
     }
 
     environment {
@@ -132,9 +137,14 @@ pipeline {
                         string(credentialsId: "tf-allowed-ssh-cidr", variable: "SSH_CIDR")
                     ]) {
                         script {
+                            // When PROVISION_JENKINS_NODE=false, exclude Jenkins EC2
+                            // from plan so it is never created/modified/destroyed
+                            def jenkinsTarget = params.PROVISION_JENKINS_NODE ? "" : "-target=module.backend_ec2 -target=module.frontend_ec2 -target=module.security_groups -target=module.vpc"
+
                             if (params.DESTROY_INFRA) {
                                 sh """
                                     terraform plan -destroy \
+                                        ${jenkinsTarget} \
                                         -var="key_pair_name=${KEY_PAIR}" \
                                         -var="allowed_ssh_cidr=${SSH_CIDR}" \
                                         -input=false \
@@ -143,6 +153,7 @@ pipeline {
                             } else {
                                 sh """
                                     terraform plan \
+                                        ${jenkinsTarget} \
                                         -var="key_pair_name=${KEY_PAIR}" \
                                         -var="allowed_ssh_cidr=${SSH_CIDR}" \
                                         -input=false \
@@ -192,6 +203,20 @@ pipeline {
                         echo "${env.BACKEND_IP}"  > ${TF_STATE_DIR}/backend_ip.txt
                         echo "${env.FRONTEND_IP}" > ${TF_STATE_DIR}/frontend_ip.txt
                     """
+
+                    // Copy SSH deploy key from Jenkins credential so app pipelines
+                    // can SSH into backend/frontend EC2s via Ansible
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: 'cicd-demo-ssh-key',
+                        keyFileVariable: 'SSH_KEY'
+                    )]) {
+                        sh """
+                            mkdir -p /var/lib/jenkins/.ssh
+                            cp \${SSH_KEY} /var/lib/jenkins/.ssh/deploy-key.pem
+                            chmod 400 /var/lib/jenkins/.ssh/deploy-key.pem
+                            chown jenkins:jenkins /var/lib/jenkins/.ssh/deploy-key.pem
+                        """
+                    }
 
                     echo "========================================"
                     echo " Infrastructure provisioned successfully"
