@@ -6,6 +6,11 @@ terraform {
     version = "~> 5.0"
   }
  }
+ backend "s3" {
+   bucket = "cicd-demo-tfstate-058264484175"
+   key    = "dev/terraform.tfstate"
+   region = "us-east-1"
+ }
 }
 
 provider "aws" { region = var.aws_region }
