@@ -199,9 +199,9 @@ pipeline {
                     )]) {
                         sh """
                             mkdir -p /var/lib/jenkins/.ssh
+                            rm -f /var/lib/jenkins/.ssh/deploy-key.pem
                             cp \${SSH_KEY} /var/lib/jenkins/.ssh/deploy-key.pem
                             chmod 400 /var/lib/jenkins/.ssh/deploy-key.pem
-                            chown jenkins:jenkins /var/lib/jenkins/.ssh/deploy-key.pem
                         """
                     }
 
