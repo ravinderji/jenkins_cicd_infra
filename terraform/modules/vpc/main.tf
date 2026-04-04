@@ -8,6 +8,10 @@ resource "aws_vpc" "main" {
   Environment = var.environment,
   ManagedBy = "Terraform"
  }
+ # Lab environments deny ec2:DeleteVpc — prevent Terraform from attempting it
+ lifecycle {
+   prevent_destroy = true
+ }
 }
 
 resource "aws_internet_gateway" "igw" {

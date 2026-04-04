@@ -33,7 +33,12 @@ pipeline {
         booleanParam(
             name:         'DESTROY_INFRA',
             defaultValue: false,
-            description:  'WARNING: Set true to destroy ALL AWS resources (VPC, EC2s, EIPs). Irreversible.'
+            description:  'Set true to destroy AWS resources. Use with DESTROY_VPC to control scope.'
+        )
+        booleanParam(
+            name:         'DESTROY_VPC',
+            defaultValue: false,
+            description:  'Set true to also destroy VPC and networking (only works if IAM permits ec2:DeleteVpc). Leave false in lab environments.'
         )
     }
 
@@ -78,6 +83,9 @@ pipeline {
                     if (params.DESTROY_INFRA) {
                         echo "⚠ DESTROY MODE — all AWS resources will be deleted ⚠"
                     }
+                    if (params.DESTROY_VPC && !params.DESTROY_INFRA) {
+                        echo "⚠ WARNING: DESTROY_VPC=true has no effect unless DESTROY_INFRA=true"
+                    }
                 }
             }
         }
@@ -90,8 +98,22 @@ pipeline {
                 echo "========================================"
                 dir("${TF_DIR}") {
                     sh "terraform version"
-                    // -reconfigure ensures a clean backend on each run
                     sh "terraform init -input=false -reconfigure"
+
+                    // Lab policy denies ec2:DeleteVpc so VPCs accumulate across runs.
+                    // Import the existing VPC (if any) so Terraform reuses it instead
+                    // of trying to create a new one and hitting the VPC limit.
+                    sh """
+                        VPC_ID=\$(aws ec2 describe-vpcs \
+                            --filters 'Name=tag:Name,Values=cicd-demo-dev-vpc' \
+                            --query 'Vpcs[0].VpcId' --output text 2>/dev/null || echo "")
+                        if [ -n "\$VPC_ID" ] && [ "\$VPC_ID" != "None" ]; then
+                            echo "Found existing VPC: \$VPC_ID — importing into state"
+                            terraform import module.vpc.aws_vpc.main \$VPC_ID 2>/dev/null || echo "VPC already in state"
+                        else
+                            echo "No existing VPC found — Terraform will create one"
+                        fi
+                    """
                 }
             }
         }
@@ -196,19 +218,46 @@ pipeline {
             steps {
                 echo "========================================"
                 echo " Stage 5 — Terraform Destroy"
-                echo " ⚠ DELETING ALL AWS RESOURCES ⚠"
+                echo " ⚠ DELETING EC2s AND SECURITY GROUPS ⚠"
+                echo " VPC is retained (lab policy denies DeleteVpc)"
                 echo "========================================"
                 dir("${TF_DIR}") {
-                    sh "terraform apply -input=false -auto-approve tfplan"
-                    // Remove persisted IP files so app pipelines
-                    // fail fast with a clear error instead of
-                    // deploying to a non-existent server
+                    withCredentials([
+                        string(credentialsId: "tf-key-pair-name",    variable: "KEY_PAIR"),
+                        string(credentialsId: "tf-allowed-ssh-cidr", variable: "SSH_CIDR")
+                    ]) {
+                        script {
+                            if (params.DESTROY_VPC) {
+                                echo "DESTROY_VPC=true — destroying everything including VPC/networking"
+                                sh """
+                                    terraform destroy -auto-approve \
+                                        -var="key_pair_name=${KEY_PAIR}" \
+                                        -var="allowed_ssh_cidr=${SSH_CIDR}" \
+                                        -input=false
+                                """
+                            } else {
+                                echo "DESTROY_VPC=false — destroying EC2s and SGs only (VPC retained)"
+                                sh """
+                                    terraform destroy -auto-approve \
+                                        -target=module.jenkins_ec2.aws_instance.this \
+                                        -target=module.backend_ec2.aws_instance.this \
+                                        -target=module.frontend_ec2.aws_instance.this \
+                                        -target=module.security_groups.aws_security_group.jenkins \
+                                        -target=module.security_groups.aws_security_group.backend \
+                                        -target=module.security_groups.aws_security_group.frontend \
+                                        -var="key_pair_name=${KEY_PAIR}" \
+                                        -var="allowed_ssh_cidr=${SSH_CIDR}" \
+                                        -input=false
+                                """
+                            }
+                        }
+                    }
                     sh """
                         rm -f ${TF_STATE_DIR}/jenkins_ip.txt
                         rm -f ${TF_STATE_DIR}/backend_ip.txt
                         rm -f ${TF_STATE_DIR}/frontend_ip.txt
                     """
-                    echo "All AWS resources destroyed and IP files removed"
+                    echo "Destroy complete. IP files removed."
                 }
             }
         }
