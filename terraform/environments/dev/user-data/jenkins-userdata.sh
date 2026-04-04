@@ -93,9 +93,12 @@ node --version
 echo "--- Node.js OK ---"
 
 # ── Ansible ───────────────────────────────────────────────────────────────────
+# Install via PPA for latest stable version — avoids pip/break-system-packages issues
 echo "--- Installing Ansible ---"
-pip3 install --quiet ansible --break-system-packages
-sudo -u jenkins ansible-galaxy collection install community.docker
+apt-add-repository -y ppa:ansible/ansible
+retry apt-get update -y
+retry apt-get install -y ansible
+ansible-galaxy collection install community.docker
 ansible --version | head -1
 echo "--- Ansible OK ---"
 
